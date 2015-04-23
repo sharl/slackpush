@@ -1,0 +1,98 @@
+#!/usr/bin/env perl
+# -*- coding: utf-8 -*-
+use strict;
+use warnings;
+use File::Basename;
+use Config::Tiny;
+use LWP::UserAgent;
+use HTTP::Request;
+use Getopt::Long qw(:config posix_default no_ignore_case gnu_compat);
+use JSON::XS 'encode_json';
+use Types::Serialiser;
+
+my $default_timeout = 10;
+my $prog = basename($0);
+my $conf = $ENV{HOME}.'/.'.$prog;
+my $r = GetOptions(
+    'c|channel=s'     => \my $channel,
+    'I|icon_url=s'    => \my $icon_url,
+    'i|icon=s'        => \my $icon,
+    'n|nick=s'        => \my $nick,
+    'h|hook=s'        => \my $hook,
+    't|timeout=i'     => \my $timeout,
+    'a|attachments=s' => \my $attachments,
+) || usage();
+sub usage {
+    if (my $mes = shift) {
+	print "$mes\n\n";
+    }
+
+    print <<EOF;
+usage: $prog [options] [message]
+
+	-c|--channel <channel>	specify channel
+	-n|--nick <nickname>	specify nickname
+	-i|--icon <icon>	specify icon (emoji like a :beer:)
+	-I|--icon_url <uri>	specify icon uri, use instead of <icon>
+	-a|--attachments <json>	specify attachments format (must json decodable)
+	-t|--timeout <timeout>	specify timeout (default is ${default_timeout})
+	-h|--hook <webhook>	specify incoming webhook
+
+EOF
+;
+    exit -1;
+}
+
+my $message = join(' ', @ARGV);
+if (! $message) {
+    my @message = <STDIN>;
+    $message = join('', @message);
+}
+my $ini = Config::Tiny->read($conf) || die Config::Tiny->errstr;
+
+$channel  ||= $ini->{_}{channel};
+$nick     ||= $ini->{_}{nick};
+$icon     ||= $ini->{_}{icon};
+$icon_url ||= $ini->{_}{icon_url};
+$hook     ||= $ini->{_}{hook};
+$timeout  ||= $ini->{_}{timeout} || $default_timeout;
+
+usage('hook missing') unless $hook;
+
+# build payload
+my $params = {
+    username => $nick,
+    channel => $channel,
+};
+my $attachments_hash = undef;
+if ($attachments) {
+    $attachments_hash = eval { JSON::XS->new->decode($attachments); };
+    $attachments_hash->[0]{fallback} = $message;
+    $message = undef;
+}
+if ($message) {
+    $params->{text} = $message;
+} elsif ($attachments_hash) {
+    $params->{attachments} = $attachments_hash;
+} else {
+    usage('no text and attachments');
+}
+if ($icon_url) {
+    $params->{icon_url} = $icon_url;
+} else {
+    $params->{icon_emoji} = $icon;
+}
+
+my $payload = 'payload=' . JSON::XS->new->pretty->encode($params);
+
+# POST
+my $ua = LWP::UserAgent->new(timeout => $timeout);
+my $req = HTTP::Request->new(POST => $hook);
+$req->header('Content-Type' => 'application/x-www-form-urlencoded');
+$req->content($payload);
+
+my $res = $ua->request($req);
+unless ($res->is_success) {
+    print $res->content, "\n";
+    exit 1;
+}
